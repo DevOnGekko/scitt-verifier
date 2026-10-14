@@ -148,7 +148,62 @@ pub struct StatementFacts {
     /// that survived — otherwise appending an unparseable blob looks identical
     /// to appending nothing.
     pub receipts_present: usize,
+    /// Receipt blobs that were present but could not be evaluated at all.
+    ///
+    /// Kept apart from `problems` so a caller can tell "this statement carries
+    /// a receipt nobody could read" from "this statement carries no receipt".
+    /// The two call for opposite actions — re-fetch versus register — and an
+    /// operator told to register a statement that is already registered goes
+    /// the wrong way.
+    pub unevaluable_receipts: Vec<UnevaluableReceipt>,
     pub problems: Vec<String>,
+}
+
+/// A receipt blob that did not get far enough to produce [`ReceiptFacts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnevaluableReceipt {
+    /// Position in the statement's receipt array, so it lines up with
+    /// [`ReceiptFacts::index`] of the receipts that did parse.
+    pub index: usize,
+    pub kind: UnevaluableKind,
+    pub reason: String,
+}
+
+/// Why a receipt could not be evaluated, coarse enough to choose an action.
+///
+/// Evaluation can stop after the receipt parsed cleanly: an algorithm this
+/// release does not implement, or a ledger key that cannot be used. Calling
+/// those "unreadable" would send the operator to re-fetch a statement that is
+/// fine, when the keys or the verifier are what need attention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnevaluableKind {
+    /// The bytes are not a receipt of the shape SCITT/CCF requires.
+    Unreadable,
+    /// A well-formed receipt using a structure or algorithm this release does
+    /// not implement.
+    Unsupported,
+    /// The supplied trust material could not be used for this receipt.
+    TrustMaterial,
+}
+
+impl UnevaluableKind {
+    pub fn of(error: &Error) -> Self {
+        match error {
+            Error::Malformed(_) | Error::Structure(_) => Self::Unreadable,
+            Error::UnsupportedVds(_) | Error::UnsupportedAlgorithm(_) => Self::Unsupported,
+            Error::TrustMaterial(_) | Error::UnknownKid(_) | Error::Crypto(_) => {
+                Self::TrustMaterial
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreadable => "unreadable",
+            Self::Unsupported => "unsupported",
+            Self::TrustMaterial => "trust-material",
+        }
+    }
 }
 
 impl StatementFacts {
@@ -271,6 +326,7 @@ pub fn verify_statement_with(
     }
 
     let mut receipts = Vec::new();
+    let mut unevaluable_receipts = Vec::new();
     for (index, blob) in receipt_blobs.iter().enumerate() {
         match verify_receipt(blob, &statement, key_set) {
             Ok(mut facts) => {
@@ -281,7 +337,14 @@ pub fn verify_statement_with(
             }
             // One unverifiable receipt must not hide a verifiable one, so the
             // failure is recorded and the loop continues.
-            Err(e) => problems.push(format!("receipt[{index}] could not be evaluated: {e}")),
+            Err(e) => {
+                problems.push(format!("receipt[{index}] could not be evaluated: {e}"));
+                unevaluable_receipts.push(UnevaluableReceipt {
+                    index,
+                    kind: UnevaluableKind::of(&e),
+                    reason: e.to_string(),
+                });
+            }
         }
     }
 
@@ -306,6 +369,7 @@ pub fn verify_statement_with(
         protected: Some(statement.protected.clone()),
         receipts,
         receipts_present: receipt_blobs.len(),
+        unevaluable_receipts,
         problems,
     })
 }
@@ -336,6 +400,41 @@ fn valid_at_registrations(details: &chain::Details, receipts: &[ReceiptFacts]) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kind chooses the operator's action, so an error that occurs after
+    /// a clean parse must never be classed as unreadable.
+    #[test]
+    fn only_parse_failures_are_classed_as_unreadable() {
+        let kind = UnevaluableKind::of;
+        assert_eq!(
+            kind(&Error::Malformed("x".into())),
+            UnevaluableKind::Unreadable
+        );
+        assert_eq!(
+            kind(&Error::Structure("x".into())),
+            UnevaluableKind::Unreadable
+        );
+        assert_eq!(
+            kind(&Error::UnsupportedVds(9)),
+            UnevaluableKind::Unsupported
+        );
+        assert_eq!(
+            kind(&Error::UnsupportedAlgorithm(-8)),
+            UnevaluableKind::Unsupported
+        );
+        assert_eq!(
+            kind(&Error::Crypto("x".into())),
+            UnevaluableKind::TrustMaterial
+        );
+        assert_eq!(
+            kind(&Error::TrustMaterial("x".into())),
+            UnevaluableKind::TrustMaterial
+        );
+        assert_eq!(
+            kind(&Error::UnknownKid("x".into())),
+            UnevaluableKind::TrustMaterial
+        );
+    }
 
     fn details(not_before: i64, not_after: i64) -> chain::Details {
         chain::Details {

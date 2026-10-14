@@ -548,7 +548,7 @@ fn statement_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<
 }
 
 fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<()> {
-    if facts.receipts.is_empty() {
+    if facts.receipts_present == 0 {
         writeln!(out)?;
         writeln!(out, "  Receipts")?;
         writeln!(
@@ -557,7 +557,23 @@ fn receipts_detail(out: &mut impl Write, facts: &StatementFacts) -> io::Result<(
         )?;
         return Ok(());
     }
-    for (index, r) in facts.receipts.iter().enumerate() {
+    // Walked by position in the statement so an unreadable receipt keeps its
+    // place and number rather than vanishing, which would make a statement
+    // whose only receipt is unreadable look like one that carries none. Both
+    // lists are in statement order, so each is consumed once: a statement
+    // padded with junk blobs must not make this quadratic.
+    let mut unevaluable = facts.unevaluable_receipts.iter().peekable();
+    let mut evaluated = facts.receipts.iter().peekable();
+    for index in 0..facts.receipts_present {
+        if let Some(u) = unevaluable.next_if(|u| u.index == index) {
+            writeln!(out)?;
+            writeln!(out, "  Receipt {}", index + 1)?;
+            writeln!(out, "    could not be evaluated  {}", safe(&u.reason))?;
+            continue;
+        }
+        let Some(r) = evaluated.next_if(|r| r.index == index) else {
+            continue;
+        };
         writeln!(out)?;
         writeln!(out, "  Receipt {}", index + 1)?;
         writeln!(

@@ -1912,8 +1912,12 @@ fn diagnose(
         ));
     }
 
-    for (i, r) in facts.receipts.iter().enumerate() {
-        let n = i + 1;
+    for r in &facts.receipts {
+        // Numbered by position in the statement, not in `facts.receipts`: an
+        // earlier blob that failed to parse is absent from that list, and
+        // counting from it would attach this receipt's findings to its
+        // neighbour.
+        let n = r.index + 1;
         // These are warnings, not errors, however alarming they read. Neither
         // says anything about the artifact: a receipt that fails to verify is
         // indistinguishable from one an attacker appended, because appending
@@ -1955,7 +1959,33 @@ fn diagnose(
         }
     }
 
-    if facts.receipts.is_empty() {
+    // A warning for the same reason as the receipt findings above: a blob
+    // that cannot be evaluated is what anyone handling the file could append,
+    // so it carries no weight against a receipt that did verify. The action
+    // follows the kind, because evaluation can also stop on a receipt that
+    // parsed cleanly, where re-fetching would change nothing.
+    for u in &facts.unevaluable_receipts {
+        let action = match u.kind {
+            scitt_receipt::UnevaluableKind::Unreadable => "This receipt was disregarded. If you expected it to count, re-fetch the transparent statement from the transparency service, or run `scitt-verifier inspect` to see what it carries.",
+            scitt_receipt::UnevaluableKind::Unsupported => "This receipt was disregarded because this release cannot verify it. If you expected it to count, check for a newer scitt-verifier release.",
+            scitt_receipt::UnevaluableKind::TrustMaterial => "This receipt was disregarded because the supplied SCITT keys could not be used for it. If you expected it to count, refresh the SCITT trust material, then re-run.",
+        };
+        out.push(Diagnostic::warning(
+            "ReceiptUnevaluable",
+            Category::Input,
+            format!(
+                "receipt {}: could not be evaluated: {}",
+                u.index + 1,
+                u.reason
+            ),
+            action,
+        ));
+    }
+
+    // Decided by the receipts present, not those that parsed. A statement
+    // whose only receipt is unreadable may well be registered, and telling
+    // the operator to register it again sends them the wrong way.
+    if facts.receipts_present == 0 {
         out.push(Diagnostic::error(
             "NoReceipt",
             Category::Trust,
@@ -1963,11 +1993,26 @@ fn diagnose(
             "Register the statement with a transparency service before deploying it.",
         ));
     } else if !facts.any_receipt_verified() {
+        // Re-fetching is the advice only when every receipt failed to parse;
+        // a receipt that parsed and still could not be evaluated points at the
+        // keys or the verifier, which a fresh copy of the statement cannot fix.
+        let all_unreadable = facts.receipts.is_empty()
+            && facts
+                .unevaluable_receipts
+                .iter()
+                .all(|u| u.kind == scitt_receipt::UnevaluableKind::Unreadable);
+        let action = if all_unreadable {
+            "No receipt on this statement could be read. Re-fetch the transparent statement from the transparency service, then re-run."
+        } else if facts.receipts.is_empty() {
+            "No receipt on this statement could be evaluated. Follow the action given for each receipt above, then re-run."
+        } else {
+            "Refresh the SCITT trust material, then re-run."
+        };
         out.push(Diagnostic::error(
             "NoVerifiedReceipt",
             Category::Trust,
             "no receipt on this statement could be fully verified",
-            "Refresh the SCITT trust material, then re-run.",
+            action,
         ));
     }
 
