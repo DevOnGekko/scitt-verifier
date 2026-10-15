@@ -760,6 +760,21 @@ internally consistent and vouched for by nobody. `pathNotBefore` and
 path was simultaneously live — the path including an externally supplied anchor,
 not the `x5chain` as transported.
 
+`leafEkuOids` contains the strictly decoded leaf EKUs only when a non-empty
+purpose requirement was successfully checked; it is `null` if no purpose
+check ran. A critical leaf EKU without `requireEku` still produces `unsupported`
+and `CertificateChainUnsupported`. A malformed EKU or an unsatisfied required
+purpose produces `invalid`, with a failed `requireEku` assertion and exit 1,
+not an unevaluated success. A matching purpose with a wrong root pin still
+fails the root assertion (exit 2). Unsupported or absent paths make
+`requireEku` `cannotEvaluate`.
+An otherwise valid matching EKU also yields `cannotEvaluate` (exit 3) when
+`anchoredExternally` is false and no `requireChainToRootSha256` assertion is
+configured. The chain facts remain valid, but `relyingPartyPolicy.satisfied`
+is false and `PolicyAssertionUnevaluable` explains the missing independent
+anchor. Supplying trusted roots or requiring a root pin is necessary for
+purpose-based policy acceptance.
+
 ### `signedStatement.certificatesValidAtRegistration`
 
 Whether that window covered every registration time the receipts attest. The

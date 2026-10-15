@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Critical leaf EKU is processed only when purpose is checked
+
+Statement assertions accept `requireEku`, a non-empty list of OIDs that must
+all occur in the strictly decoded leaf EKU on a validated path. This enables
+processing a critical leaf EKU; without a purpose requirement the same chain
+still reports `CertificateChainUnsupported`. Missing required purposes and
+malformed EKUs fail closed. Root pins remain independent requirements.
+An embedded-only anchor cannot satisfy `requireEku` without a separate policy
+root pin: the assertion reports `cannotEvaluate` unless the path used supplied
+trusted roots or the policy also requires `requireChainToRootSha256`. A wrong
+configured pin still fails independently of a matching EKU. Strict extension
+decoding rejects non-DER critical flags as well as duplicate EKU extensions.
+Raw certificate EKU must be exactly one canonically encoded SEQUENCE:
+extra wrappers, nonminimal lengths or OID encodings, and overflowing arcs
+are rejected rather than matched to a different purpose.
+
+Pair with `certificateValidAtSigningTime`: short-lived signing leaves are
+judged at verified receipt registration time, not at today's clock or the
+signer's claimed time. JSON path facts add `leafEkuOids`, populated only after
+a purpose check. The CLI and WASM policy entry point both wire the assertion.
+WASM verification functions also accept optional policy bytes so the browser
+demo displays and decides from the same purpose-checked path as policy
+evaluation, including when the receipt key is bound to a service certificate.
+Older binaries refuse policies containing `requireEku` rather than skipping it.
+
+Critical CA EKU, did:x509 resolution and intermediate-subject assertions remain
+outside this change (#29). Conditional leaf handling locally mirrors the
+pinned TAV path policy without changing its pin; a purpose-aware upstream hook
+is the follow-up.
+
 ### External signer chains can be pinned to an independently selected root
 
 `externalSignatures[]` accepts `requireChainToRootSha256` and optional

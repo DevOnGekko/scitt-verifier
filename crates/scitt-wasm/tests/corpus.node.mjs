@@ -564,5 +564,97 @@ for (const [label, args, says] of [
   check(`${label} is refused, and says why`, message.includes(says), true);
 }
 
+console.log('\n--- synthetic critical leaf EKU purpose checks ---');
+const ekuDir = join(here, '..', '..', 'scitt-verifier', 'tests', 'fixtures', 'critical-eku');
+const ekuRead = (name) => new Uint8Array(readFileSync(join(ekuDir, name)));
+const ekuExpected = JSON.parse(readFileSync(join(ekuDir, 'expected.json'), 'utf8'));
+const ekuKeys = ekuRead('keys.cbor');
+const ekuPolicy = (assertions) => new TextEncoder().encode(JSON.stringify({
+  policyId: 'synthetic-purpose', policyVersion: '1', assertions,
+}));
+const ekuAssertions = {
+  requireEku: ekuExpected.leafEkuOids,
+  requireChainToRootSha256: ekuExpected.rootSha256,
+  certificateValidAtSigningTime: true,
+};
+const ekuEvaluate = (fixture, assertions = ekuAssertions) => JSON.parse(evaluatePolicy(
+  ekuRead(`${fixture}.cose`), ekuKeys, ekuPolicy(assertions), ekuExpected.registeredAt,
+));
+check('a critical EKU without purpose is unsupported',
+  JSON.parse(verifyStatement(ekuRead('valid.cose'), ekuKeys)).chainValidation.outcome,
+  'unsupported');
+check('the policy entry point enables matching critical EKU',
+  ekuEvaluate('valid').satisfied, true);
+check('noncritical EKU is also checked', ekuEvaluate('noncritical').satisfied, true);
+const ekuOnly = { requireEku: ekuExpected.leafEkuOids };
+for (const fixture of ['valid', 'noncritical']) {
+  const unpinnedPurpose = ekuEvaluate(fixture, ekuOnly);
+  check(`${fixture}: embedded EKU alone cannot satisfy policy`,
+    unpinnedPurpose.satisfied, false);
+  check(`${fixture}: independent anchoring is unevaluable, not satisfied`,
+    unpinnedPurpose.assertions.find((a) => a.name === 'requireEku').outcome,
+    'cannotEvaluate');
+}
+const ekuRoot = certificatesIn(ekuRead('valid.cose'))
+  .find((c) => c.subject === 'CN=Synthetic Purpose Root');
+check('the synthetic purpose root is found', Boolean(ekuRoot), true);
+const externallyAnchoredPurpose = JSON.parse(evaluatePolicy(
+  ekuRead('valid.cose'), ekuKeys, ekuPolicy(ekuOnly), ekuExpected.registeredAt,
+  pem(ekuRoot.der),
+));
+check('a supplied trusted anchor satisfies EKU without a root pin',
+  externallyAnchoredPurpose.satisfied, true);
+const purposeFacts = JSON.parse(verifyStatement(
+  ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy(ekuAssertions),
+));
+check('verification uses the same purpose as policy evaluation',
+  purposeFacts.chainValidation.outcome, 'valid');
+check('purpose-checked facts retain independent anchoring',
+  purposeFacts.chainValidation.anchoredExternally, true);
+check('the displayed purpose evidence matches the policy',
+  purposeFacts.chainValidation.leafEkuOids, ekuExpected.leafEkuOids);
+check('registration-time validity uses the purpose-checked path',
+  purposeFacts.certificatesValidAtRegistration, true);
+const wrongPurposeFacts = JSON.parse(verifyStatement(
+  ekuRead('valid.cose'), ekuKeys, pem(ekuRoot.der), ekuPolicy({
+    ...ekuAssertions, requireEku: ['1.2.3'],
+  }),
+));
+check('verification does not ignore a missing required purpose',
+  wrongPurposeFacts.chainValidation.outcome, 'invalid');
+const servicePurposeFacts = JSON.parse(verifyStatementWithServiceCert(
+  genuine, keys, serviceCert, rootPem, ekuPolicy({ requireEku: ['1.2.3'] }),
+));
+check('service-certificate verification also checks the supplied purpose',
+  servicePurposeFacts.chainValidation.outcome, 'invalid');
+check('purpose options do not bypass service-key binding',
+  servicePurposeFacts.serviceKey.bound, true);
+for (const verify of [
+  (policy) => verifyStatement(genuine, keys, rootPem, policy),
+  (policy) => verifyStatementWithServiceCert(genuine, keys, serviceCert, rootPem, policy),
+]) {
+  let refused = false;
+  try { verify(new TextEncoder().encode('{ not json')); } catch { refused = true; }
+  check('a malformed verification policy is refused, not ignored', refused, true);
+}
+for (const fixture of ['absent-eku', 'any-eku', 'malformed-eku', 'duplicate-eku']) {
+  check(`${fixture} cannot satisfy the purpose requirement`,
+    ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome, 'fail');
+}
+check('every required OID is necessary', ekuEvaluate('valid', {
+  ...ekuAssertions, requireEku: [...ekuExpected.leafEkuOids, '1.3.6.1.4.1.55555.3'],
+}).failed, true);
+check('matching purpose does not bypass a wrong root', ekuEvaluate('valid', {
+  ...ekuAssertions, requireChainToRootSha256: '00'.repeat(32),
+}).failed, true);
+for (const fixture of ['leaf-only', 'ca-critical-eku', 'unknown-critical']) {
+  check(`${fixture} cannot evaluate purpose`,
+    ekuEvaluate(fixture).assertions.find((a) => a.name === 'requireEku').outcome,
+    'cannotEvaluate');
+}
+check('registration after expiry still fails', ekuEvaluate('late-registration').failed, true);
+check('missing registration time is not replaced by the statement iat',
+  ekuEvaluate('no-registration-time').unevaluable, true);
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`);
 process.exit(failures === 0 ? 0 : 1);
