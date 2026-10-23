@@ -75,7 +75,7 @@ VERIFY OPTIONS:
     --artifact <FILE>        The artifact the statement should describe.
     --binding-mode <MODE>    none | payload-bytes | payload-digest |
                              saved-evidence (with --adapter; see below). Builds
-                             with a ledger adapter also offer live-evidence.
+                             with an online adapter also offer live-evidence.
                                                                    [default: none]
     --format <FORMAT>        text | json                                   [default: text]
     --verbose, -v            Show detailed progress, full evidence values, and
@@ -151,6 +151,35 @@ The profile and the allowed source repository come from
                            rebuild matches the record it commits to
 "#;
 
+#[cfg(feature = "adapter-azure-attestation")]
+pub const MAA_USAGE: &str = r#"
+AZURE ATTESTATION (azure-attestation adapter):
+    --adapter azure-attestation --binding-mode saved-evidence --evidence <DIR>
+                             Read maa-evidence.json (at most 4 MiB).
+    --adapter adapter-azure-attestation --binding-mode live-evidence --online
+                             Acquire /certs from the selected MAA target.
+    --maa-endpoint <URL>     HTTPS service origin, with an optional trailing /.
+                             Overrides policy target.host for live acquisition.
+                             No credentials, ports, paths, query or fragment.
+                             azure-attestation remains a selector alias.
+    --save-evidence <DIR>    Preserve live evidence without overwriting it.
+
+Requirements are under adapters.azure-attestation in the policy:
+binding.{path,encoding,maxDecodedBytes} and optional target.host. Live acquisition
+needs --maa-endpoint or target.host; saved replay requires target.host.
+Compare SHA-256 of the exact decoded
+execution policy bytes with HOST_DATA in AMD-authenticated SNP reports.
+resource-transparent covers only this comparison in supplied certificate
+evidence, not service/signing-key/serving-node identity, guest enforcement or
+freshness. UVM endorsements and relying-party platform/TCB/SVN policy are not
+appraised. The /certs version header is metadata only; it is never compared with
+the statement or used for acceptance. Saved metadata is unsigned and
+collector-asserted.
+"#;
+
+#[cfg(not(feature = "adapter-azure-attestation"))]
+pub const MAA_USAGE: &str = "";
+
 /// Help for the ledger-evidence binding mode, when this build has it.
 ///
 /// Gated so an adapter-less build never advertises a mode it cannot run.
@@ -201,7 +230,7 @@ when it observed the nodes; a saved one reports when someone else did.
                            nodes enforce the policy it embeds
 "#;
 
-/// Nothing to add: this build has no adapter.
+/// This build has no Azure Confidential Ledger adapter help to add.
 #[cfg(not(feature = "adapter-azure-confidential-ledger"))]
 pub const ADAPTER_USAGE: &str = "";
 
@@ -224,12 +253,12 @@ pub enum BindingMode {
     /// ledger would otherwise pass while checking a file that was captured
     /// months ago.
     SavedEvidence,
-    /// Collect the ledger's attestation evidence now, and appraise it.
+    /// Collect the selected target's evidence now, and appraise it.
     ///
-    /// Distinct from `SavedEvidence` because the anchor differs, not because
-    /// the checks do. Here the service certificate comes from the public
-    /// identity service, so the ledger cannot supply the thing it is being
-    /// checked against.
+    /// Distinct from `SavedEvidence` because acquisition authenticates a
+    /// source during this run, rather than trusting saved provenance metadata.
+    /// Authentication is adapter-specific and does not imply report freshness
+    /// or binding to the serving node.
     LiveEvidence,
 }
 
@@ -247,6 +276,8 @@ impl BindingMode {
 /// result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Adapter {
+    /// Azure Attestation certificate reports compared with statement policy.
+    AzureAttestation,
     /// Azure Confidential Ledger nodes attested with SEV-SNP.
     AzureConfidentialLedger,
     /// A supplied image rebuild compared with a statement-committed
@@ -257,6 +288,7 @@ pub enum Adapter {
 impl Adapter {
     pub fn as_str(self) -> &'static str {
         match self {
+            Adapter::AzureAttestation => "azure-attestation",
             Adapter::AzureConfidentialLedger => "azure-confidential-ledger",
             Adapter::ImageReproduction => "image-reproduction",
         }
@@ -332,12 +364,14 @@ pub struct VerifyArgs {
     pub adapter: Option<Adapter>,
     /// The saved evidence bundle to appraise.
     pub evidence: Option<PathBuf>,
-    /// Where to write evidence collected from a live ledger, if asked for.
+    /// Where to write evidence collected from the live target, if asked for.
     ///
     /// Live-only, for the same reason `--save-keys` is online-only: there is
     /// nothing this run collected to save when it appraised a bundle someone
     /// else recorded, and accepting the flag anyway would imply it had.
     pub save_evidence: Option<PathBuf>,
+    /// Live MAA acquisition origin; takes precedence over the policy target.
+    pub maa_endpoint: Option<String>,
     pub format: Format,
     /// Include the completed evidence report in human-readable output.
     pub verbose: bool,
@@ -396,6 +430,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut adapter = None;
     let mut evidence = None;
     let mut save_evidence = None;
+    let mut maa_endpoint = None;
     let mut format = Format::Text;
     let mut verbose = false;
     let mut result = None;
@@ -432,20 +467,34 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 });
             }
             "--adapter" => {
+                if adapter.is_some() {
+                    return Err(
+                        "--adapter may be supplied only once; a run appraises one adapter".into(),
+                    );
+                }
                 let raw = value(&mut it, flag)?;
                 adapter = Some(match raw.as_str() {
+                    "azure-attestation" | "adapter-azure-attestation" => Adapter::AzureAttestation,
                     "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
                     "image-reproduction" => Adapter::ImageReproduction,
                     other => {
                         return Err(format!(
                             "unknown adapter '{other}'; expected 'azure-confidential-ledger' \
-                             or 'image-reproduction'"
+                             or 'azure-attestation' or 'image-reproduction'"
                         ))
                     }
                 });
             }
             "--evidence" => evidence = Some(PathBuf::from(value(&mut it, flag)?)),
             "--save-evidence" => save_evidence = Some(PathBuf::from(value(&mut it, flag)?)),
+            "--maa-endpoint" => {
+                if maa_endpoint.is_some() {
+                    return Err("--maa-endpoint may be supplied only once".into());
+                }
+                let endpoint = value(&mut it, flag)?;
+                scitt_network::maa::endpoint_host(&endpoint).map_err(|e| e.to_string())?;
+                maa_endpoint = Some(endpoint.clone());
+            }
             "--format" => {
                 format = match value(&mut it, flag)?.as_str() {
                     "text" => Format::Text,
@@ -586,6 +635,14 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if binding_mode == BindingMode::SavedEvidence && evidence.is_none() {
         return Err("--binding-mode saved-evidence requires --evidence <DIR>".into());
     }
+    if maa_endpoint.is_some()
+        && (adapter != Some(Adapter::AzureAttestation) || binding_mode != BindingMode::LiveEvidence)
+    {
+        return Err(
+            "--maa-endpoint requires --adapter adapter-azure-attestation and --binding-mode live-evidence"
+                .into(),
+        );
+    }
     if binding_mode != BindingMode::SavedEvidence && evidence.is_some() {
         return Err(
             "--evidence supplies a recorded bundle, which only means something with \
@@ -600,7 +657,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     // mode would let an offline-looking command line make requests.
     if binding_mode == BindingMode::LiveEvidence && !matches!(trust, TrustSource::Online { .. }) {
         return Err(
-            "--binding-mode live-evidence collects evidence from the ledger, so it requires \
+            "--binding-mode live-evidence collects evidence from the target service, so it requires \
              --online. An offline run cannot observe a service; use --binding-mode \
              saved-evidence with a bundle captured earlier."
                 .into(),
@@ -650,6 +707,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         adapter,
         evidence,
         save_evidence,
+        maa_endpoint,
         format,
         verbose,
         result,
@@ -777,6 +835,123 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn requested_maa_live_command_preserves_endpoint_and_snapshot_options() {
+        let command = args(&[
+            "verify",
+            "--statement",
+            "maa.statement.cose",
+            "--policy",
+            "acl-live-policy.json",
+            "--online",
+            "--adapter",
+            "adapter-azure-attestation",
+            "--binding-mode",
+            "live-evidence",
+            "--maa-endpoint",
+            "https://sharedweu.weu.attest.azure.net",
+            "--save-trust",
+            "trust-snap",
+            "--save-evidence",
+            "evidence-snap",
+            "--verbose",
+        ]);
+        let Command::Verify(verify) = parse(&command).unwrap() else {
+            panic!("verify expected");
+        };
+        assert_eq!(verify.adapter, Some(Adapter::AzureAttestation));
+        assert_eq!(verify.binding_mode, BindingMode::LiveEvidence);
+        assert_eq!(
+            verify.maa_endpoint.as_deref(),
+            Some("https://sharedweu.weu.attest.azure.net")
+        );
+        assert_eq!(verify.save_trust, Some(PathBuf::from("trust-snap")));
+        assert_eq!(verify.save_evidence, Some(PathBuf::from("evidence-snap")));
+        assert!(verify.verbose);
+    }
+
+    #[test]
+    fn maa_endpoint_cannot_be_silently_ignored_or_repeated() {
+        for (adapter, mode) in [
+            ("azure-confidential-ledger", "live-evidence"),
+            ("azure-attestation", "saved-evidence"),
+        ] {
+            let mut command = args(&[
+                "verify",
+                "--statement",
+                "s.cose",
+                "--policy",
+                "p.json",
+                "--online",
+                "--adapter",
+                adapter,
+                "--binding-mode",
+                mode,
+                "--maa-endpoint",
+                "https://example.attest.azure.net",
+            ]);
+            if mode == "saved-evidence" {
+                command.extend(args(&["--evidence", "snapshot"]));
+            }
+            assert!(parse(&command).unwrap_err().contains("--maa-endpoint"));
+        }
+        let command = args(&[
+            "verify",
+            "--maa-endpoint",
+            "https://example.attest.azure.net",
+            "--maa-endpoint",
+            "https://second.attest.azure.net",
+        ]);
+        assert!(parse(&command).unwrap_err().contains("only once"));
+    }
+
+    #[test]
+    fn azure_attestation_selector_is_recognized_in_every_build() {
+        let Command::Verify(verify) = parse(&args(&[
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--scitt-keys",
+            "keys.cbor",
+            "--policy",
+            "policy.json",
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "saved-evidence",
+            "--evidence",
+            "evidence",
+        ]))
+        .unwrap() else {
+            panic!("verify command expected")
+        };
+        assert_eq!(verify.adapter, Some(Adapter::AzureAttestation));
+        let err = parse(&args(&[
+            "verify",
+            "--statement",
+            "statement.cose",
+            "--scitt-keys",
+            "keys.cbor",
+            "--policy",
+            "policy.json",
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "live-evidence",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--online"), "{err}");
+        let err = parse(&args(&[
+            "verify",
+            "--adapter",
+            "azure-attestation",
+            "--adapter",
+            "azure-confidential-ledger",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("only once"), "{err}");
     }
 
     #[test]
