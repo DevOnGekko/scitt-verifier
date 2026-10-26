@@ -320,13 +320,9 @@ mod bundle {
         if !path.starts_with(&root) {
             return Err(format!("{FILE} escapes the evidence directory"));
         }
-        let file = std::fs::File::open(&path).map_err(|e| format!("{FILE}: {e}"))?;
-        let metadata = file.metadata().map_err(|e| format!("{FILE}: {e}"))?;
-        if !metadata.is_file() || metadata.len() > MAX_BYTES {
-            return Err(format!(
-                "{FILE} must be a regular file at most {MAX_BYTES} bytes"
-            ));
-        }
+        let metadata = std::fs::metadata(&path).map_err(|e| format!("{FILE}: {e}"))?;
+        check_metadata(&metadata)?;
+        let file = open_file(&path)?;
         let mut bytes = Vec::new();
         file.take(MAX_BYTES + 1)
             .read_to_end(&mut bytes)
@@ -336,6 +332,30 @@ mod bundle {
         }
         let value = scitt_policy::parse_payload_json(&bytes)?;
         serde_json::from_value(value).map_err(|e| format!("{FILE}: {e}"))
+    }
+
+    fn check_metadata(metadata: &std::fs::Metadata) -> Result<(), String> {
+        if !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return Err(format!(
+                "{FILE} must be a regular file at most {MAX_BYTES} bytes"
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_file(path: &Path) -> Result<std::fs::File, String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A regular file can be replaced after the path check. A FIFO must
+            // not block the open, and a replacement symlink must not be followed.
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        let file = options.open(path).map_err(|e| format!("{FILE}: {e}"))?;
+        check_metadata(&file.metadata().map_err(|e| format!("{FILE}: {e}"))?)?;
+        Ok(file)
     }
 
     pub fn save(dir: &Path, bundle: &Bundle) -> Result<(), String> {
@@ -365,6 +385,75 @@ mod bundle {
             return Err(format!("saving {FILE}: {e}"));
         }
         Ok(())
+    }
+
+    #[cfg(all(test, unix))]
+    mod tests {
+        use super::*;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn fifo_evidence_is_rejected_without_a_writer() {
+            const CHILD_DIR: &str = "SCITT_MAA_FIFO_TEST_DIR";
+            const CHILD_MODE: &str = "SCITT_MAA_FIFO_TEST_MODE";
+            if let Some(dir) = std::env::var_os(CHILD_DIR) {
+                let dir = std::path::PathBuf::from(dir);
+                let path = dir.join(FILE);
+                let replacement = std::env::var(CHILD_MODE).unwrap() == "replacement";
+                if replacement {
+                    std::fs::write(&path, b"").unwrap();
+                    check_metadata(&std::fs::metadata(&path).unwrap()).unwrap();
+                    std::fs::remove_file(&path).unwrap();
+                }
+                assert!(Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success());
+                let error = if replacement {
+                    open_file(&path).unwrap_err()
+                } else {
+                    load(&dir).unwrap_err()
+                };
+                assert!(error.contains("must be a regular file"), "{error}");
+                return;
+            }
+
+            for mode in ["load", "replacement"] {
+                let dir =
+                    std::env::temp_dir().join(format!("maa-fifo-{mode}-{}", std::process::id()));
+                std::fs::create_dir(&dir).unwrap();
+                let mut child = Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "adapters::maa::bundle::tests::fifo_evidence_is_rejected_without_a_writer",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_DIR, &dir)
+                    .env(CHILD_MODE, mode)
+                    .spawn()
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let status = loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        break Some(status);
+                    }
+                    if Instant::now() >= deadline {
+                        child.kill().unwrap();
+                        child.wait().unwrap();
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                };
+                std::fs::remove_dir_all(dir).unwrap();
+                assert!(
+                    status.is_some(),
+                    "{mode}: FIFO open blocked without a writer"
+                );
+                assert!(status.unwrap().success(), "{mode}: FIFO was not rejected");
+            }
+        }
     }
 }
 

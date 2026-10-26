@@ -134,7 +134,9 @@ scitt-verifier verify --statement statement.cose --policy maa-policy.json \
   --binding-mode saved-evidence --evidence maa-snapshot
 ```
 
-The loader bounds the file and refuses paths escaping the evidence directory.
+The loader requires a regular file of at most 4 MiB and refuses paths escaping
+the evidence directory. On Unix, opening is nonblocking and the opened file's
+type is checked again, so a FIFO substituted during opening is also refused.
 Saved replay requires policy `target.host` to match the captured `targetHost`.
 If a CLI endpoint overrode the policy target during capture, set the replay
 policy target to that captured host.
