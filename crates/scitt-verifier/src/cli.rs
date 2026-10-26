@@ -163,17 +163,17 @@ pub const MAA_USAGE: &str = r#"
 AZURE ATTESTATION (azure-attestation adapter):
     --adapter azure-attestation --binding-mode saved-evidence --evidence <DIR>
                              Read maa-evidence.json (at most 4 MiB).
-    --adapter adapter-azure-attestation --binding-mode live-evidence --online
+    --adapter azure-attestation --binding-mode live-evidence --online
                              Acquire /certs from the selected MAA target.
-    --maa-endpoint <URL>     HTTPS service origin, with an optional trailing /.
+    --maa-endpoint <URL>     Required for MAA live evidence. HTTPS service origin,
+                             with an optional trailing /.
                              Overrides policy target.host for live acquisition.
                              No credentials, ports, paths, query or fragment.
-                             azure-attestation remains a selector alias.
     --save-evidence <DIR>    Preserve live evidence without overwriting it.
 
 Requirements are under adapters.azure-attestation in the policy:
 binding.{path,encoding,maxDecodedBytes} and optional target.host. Live acquisition
-needs --maa-endpoint or target.host; saved replay requires target.host.
+requires --maa-endpoint; saved replay requires target.host and no endpoint flag.
 Compare SHA-256 of the exact decoded
 execution policy bytes with HOST_DATA in AMD-authenticated SNP reports.
 resource-transparent covers only this comparison in supplied certificate
@@ -481,7 +481,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
                 let raw = value(&mut it, flag)?;
                 adapter = Some(match raw.as_str() {
-                    "azure-attestation" | "adapter-azure-attestation" => Adapter::AzureAttestation,
+                    "azure-attestation" => Adapter::AzureAttestation,
                     "azure-confidential-ledger" => Adapter::AzureConfidentialLedger,
                     "image-reproduction" => Adapter::ImageReproduction,
                     other => {
@@ -646,7 +646,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         && (adapter != Some(Adapter::AzureAttestation) || binding_mode != BindingMode::LiveEvidence)
     {
         return Err(
-            "--maa-endpoint requires --adapter adapter-azure-attestation and --binding-mode live-evidence"
+            "--maa-endpoint requires --adapter azure-attestation and --binding-mode live-evidence"
                 .into(),
         );
     }
@@ -674,6 +674,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         return Err(
             "--save-evidence preserves evidence this run collected, so it only means \
              something with --binding-mode live-evidence."
+                .into(),
+        );
+    }
+    if adapter == Some(Adapter::AzureAttestation)
+        && binding_mode == BindingMode::LiveEvidence
+        && maa_endpoint.is_none()
+    {
+        return Err(
+            "--adapter azure-attestation with --binding-mode live-evidence requires --maa-endpoint <URL>; policy target.host is not a live acquisition fallback"
                 .into(),
         );
     }
@@ -854,7 +863,7 @@ mod tests {
             "acl-live-policy.json",
             "--online",
             "--adapter",
-            "adapter-azure-attestation",
+            "azure-attestation",
             "--binding-mode",
             "live-evidence",
             "--maa-endpoint",
@@ -912,6 +921,33 @@ mod tests {
             "https://second.attest.azure.net",
         ]);
         assert!(parse(&command).unwrap_err().contains("only once"));
+    }
+
+    #[test]
+    fn maa_live_evidence_requires_an_explicit_endpoint() {
+        let command = args(&[
+            "verify",
+            "--statement",
+            "s.cose",
+            "--policy",
+            "p.json",
+            "--online",
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "live-evidence",
+        ]);
+        let error = parse(&command).unwrap_err();
+        assert!(error.contains("requires --maa-endpoint"), "{error}");
+        assert!(error.contains("not a live acquisition fallback"), "{error}");
+    }
+
+    #[test]
+    fn maa_adapter_feature_name_is_not_a_cli_selector() {
+        let command = args(&["verify", "--adapter", "adapter-azure-attestation"]);
+        let error = parse(&command).unwrap_err();
+        assert!(error.contains("unknown adapter"), "{error}");
+        assert!(error.contains("'azure-attestation'"), "{error}");
     }
 
     #[test]

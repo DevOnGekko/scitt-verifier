@@ -17,7 +17,7 @@ fn target_host<'a>(policy: &'a MaaPolicy, endpoint: Option<&'a str>) -> Result<&
             .as_ref()
             .map(|target| target.host.as_str())
             .ok_or_else(|| {
-                "MAA acquisition requires --maa-endpoint or policy target.host; saved evidence requires policy target.host"
+                "saved MAA evidence requires policy target.host; live acquisition requires --maa-endpoint"
                     .into()
             }),
     }
@@ -125,7 +125,17 @@ pub fn appraise_evidence(
     progress: &mut dyn Sink,
 ) -> AdapterAssessment {
     let endpoint = match &source {
-        EvidenceSource::Live { maa_endpoint, .. } => *maa_endpoint,
+        EvidenceSource::Live {
+            maa_endpoint: Some(endpoint),
+            ..
+        } => Some(*endpoint),
+        EvidenceSource::Live {
+            maa_endpoint: None, ..
+        } => {
+            return not_attempted(
+                "live MAA evidence requires --maa-endpoint; policy target.host is not a fallback",
+            );
+        }
         EvidenceSource::Saved(_) => None,
     };
     let host = match target_host(policy, endpoint) {

@@ -11,12 +11,20 @@ statement's exact decoded execution-policy bytes. Acquisition is explicit;
 saved evidence replays offline. `x-ms-maa-service-version` is preserved as
 unsigned metadata, not a build-acceptance requirement.
 
-The CLI also accepts `--adapter adapter-azure-attestation`. For live evidence,
-`--maa-endpoint` selects an HTTPS MAA service origin and fetches its `/certs`,
-overriding any policy `target.host`. The policy target may be omitted when
-the flag supplies the live target. Saved replay still requires a matching
+The single CLI selector is `--adapter azure-attestation`;
+`adapter-azure-attestation` remains the Cargo feature name, not a CLI alias.
+Live evidence requires `--maa-endpoint` to select an HTTPS MAA service origin
+and fetch its `/certs`, overriding any policy `target.host`. Omitting the flag
+is a usage error (exit 4); there is no policy-host fallback. The policy target
+may be omitted for live acquisition. Saved replay still requires a matching
 policy target; the flag cannot redirect saved evidence. Receipt trust
 acquisition remains independent of this endpoint.
+
+An opt-in end-to-end CLI test accepts genuine matching statement/trust/evidence
+inputs through `SCITT_MAA_E2E_DIR` and requires exit 0, `resource-transparent`,
+and every statement and adapter check to pass. It is ignored by default: the
+corpus has no registered statement carrying the policy matching the MAA
+snapshot. The existing HOST_DATA-mismatch regression remains unchanged.
 
 The accepted scope is the authenticated report's policy-digest comparison,
 not MAA service signing-key identity or proof of guest policy enforcement.

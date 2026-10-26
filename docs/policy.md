@@ -132,7 +132,7 @@ adapters.azure-confidential-ledger.target   The ledger being appraised (host).
 adapters.azure-confidential-ledger.trust    UVM endorsement trust inputs.
 adapters.azure-confidential-ledger.binding  Execution-policy claim and node requirements.
 
-adapters.azure-attestation.target           MAA acquisition host; optional with live --maa-endpoint, which overrides it. Required for saved replay.
+adapters.azure-attestation.target           Saved-evidence target host; required for replay. Optional for live acquisition, which requires --maa-endpoint and uses that endpoint instead.
 adapters.azure-attestation.binding          Encoded execution-policy claim and optional decoded-size bound.
 
 adapters.image-reproduction.profile           How the statement and records are read.

@@ -28,8 +28,9 @@ adapter.
 ## Microsoft Azure Attestation (MAA)
 
 Build with `cargo build --release --features adapter-azure-attestation`.
-Select `--adapter adapter-azure-attestation` (`azure-attestation` is also
-accepted). Like the ledger adapter, it runs only
+Select `--adapter azure-attestation`. This is the only CLI selector;
+`adapter-azure-attestation` is the Cargo feature name, not a selector.
+Like the ledger adapter, it runs only
 after the complete statement verdict passes, and only against that accepted
 in-memory statement.
 
@@ -100,14 +101,15 @@ The same schema example is available as
 
 ```console
 scitt-verifier verify --statement statement.cose --policy maa-policy.json \
-  --online --adapter adapter-azure-attestation --binding-mode live-evidence \
+  --online --adapter azure-attestation --binding-mode live-evidence \
   --maa-endpoint "https://example.region.attest.azure.net" \
   --save-trust trust-snapshot --save-evidence maa-snapshot --verbose
 ```
 
-`--maa-endpoint` takes precedence over `target.host`, even if the policy names
-a different host. The policy target is optional for live acquisition when this
-flag is supplied. Without the flag, acquisition uses the policy target.
+`--maa-endpoint` is required for live MAA acquisition and takes precedence over
+`target.host`, even if the policy names a different host. The policy target is
+optional for live acquisition. Omitting the endpoint is a usage error (exit 4);
+the policy host is never a live acquisition fallback.
 The effective target is reported and saved in the bundle's `targetHost`;
 it is an acquisition choice, not authenticated SNP report identity.
 
@@ -140,6 +142,31 @@ A saved bundle's target and build header are unsigned collector metadata:
 replay checks their consistency, not their origin. Neither live nor saved
 evidence establishes report freshness, revocation, fleet completeness, or
 binding to the serving TLS connection. These gaps are reported at runtime.
+
+### MAA end-to-end success test
+
+The committed MAA snapshot authenticates real SNP reports with matching
+HOST_DATA in pure-adapter tests. The existing registered JSON statement
+fixture does not contain the matching execution policy, so the CLI tests use
+it to exercise missing-claim and HOST_DATA-mismatch outcomes, not a fabricated
+success. No synthetic statement, receipt or key set substitutes for a real
+registered fixture.
+
+An opt-in CLI test exercises the complete offline success path, including
+statement signature, receipt, policy, SNP authentication and HOST_DATA
+comparison. Set `SCITT_MAA_E2E_DIR` to a directory containing a genuine
+`statement.cose`, its independently selected receipt `keys.cbor`, a
+`policy.json` configuring the matching claim and saved target, and an
+`evidence/maa-evidence.json` bundle. Then run:
+
+```console
+cargo test -p scitt-verifier --features adapter-azure-attestation --test maa genuine_matching_statement_and_saved_maa_evidence_exit_zero -- --ignored
+```
+
+The test requires exit 0, `resource-transparent`, passing statement checks
+and all three passing adapter checks; missing inputs fail rather than skip.
+It is ignored by default because no matching registered statement is in the
+corpus. Keep customer or partner inputs outside the repository.
 
 ## Build and select the MST ledger adapter
 

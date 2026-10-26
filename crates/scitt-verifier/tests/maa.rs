@@ -204,3 +204,72 @@ fn saved_target_metadata_must_still_match_the_selected_policy() {
         .unwrap()
         .contains("does not exactly match"));
 }
+
+#[test]
+fn live_maa_missing_endpoint_is_a_usage_error_before_any_input_or_network_access() {
+    let output = Command::new(env!("CARGO_BIN_EXE_scitt-verifier"))
+        .args([
+            "verify",
+            "--statement",
+            "nonexistent-statement.cose",
+            "--policy",
+            "nonexistent-policy.json",
+            "--online",
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "live-evidence",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --maa-endpoint"));
+}
+
+#[cfg(feature = "adapter-azure-attestation")]
+#[test]
+#[ignore = "requires genuine matching registered statement and saved evidence; set SCITT_MAA_E2E_DIR"]
+fn genuine_matching_statement_and_saved_maa_evidence_exit_zero() {
+    let dir = PathBuf::from(std::env::var_os("SCITT_MAA_E2E_DIR")
+        .expect("set SCITT_MAA_E2E_DIR to a directory with statement.cose, policy.json, keys.cbor and evidence/maa-evidence.json"));
+    let output = Command::new(env!("CARGO_BIN_EXE_scitt-verifier"))
+        .arg("verify")
+        .arg("--statement")
+        .arg(dir.join("statement.cose"))
+        .arg("--policy")
+        .arg(dir.join("policy.json"))
+        .arg("--scitt-keys")
+        .arg(dir.join("keys.cbor"))
+        .args([
+            "--adapter",
+            "azure-attestation",
+            "--binding-mode",
+            "saved-evidence",
+        ])
+        .arg("--evidence")
+        .arg(dir.join("evidence"))
+        .args(["--format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}; stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let record: Value = serde_json::from_slice(&output.stdout).expect("complete JSON verdict");
+    assert_statement_accepted(&record);
+    assert_eq!(record["appraisal"]["verdict"], "resource-transparent");
+    for check in [
+        "snp-validation",
+        "cce-policy-host-data",
+        "maa-certificate-coverage",
+    ] {
+        assert_eq!(adapter_check(&record, check)["state"], "pass", "{record}");
+    }
+    assert!(!record["appraisal"]["notChecked"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}

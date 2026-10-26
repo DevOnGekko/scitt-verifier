@@ -127,8 +127,8 @@ Neither is required for ordinary statement or artifact verification.
 evidence and compares `HOST_DATA` with SHA-256 of the exact decoded execution
 policy in the accepted statement.
 Build with `--features adapter-azure-attestation` and select
-`--adapter adapter-azure-attestation` (`azure-attestation` is also accepted)
-with saved or live evidence. For live acquisition, `--maa-endpoint
+`--adapter azure-attestation` with saved or live evidence. Live acquisition
+requires `--maa-endpoint
 https://example.region.attest.azure.net` overrides the policy target and fetches
 its `/certs`; saved replay uses the host recorded in the bundle and requires a
 matching policy target. A scoped pass does
